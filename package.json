@@ -1,0 +1,44 @@
+{
+  "name": "ghostos",
+  "productName": "GhostOS",
+  "version": "0.4.0",
+  "private": true,
+  "description": "A local-first Mac home for your projects and Claude Code sessions: one board of what needs attention, sessions as work logs, scheduled runs and project memory.",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "node scripts/build.mjs && electron .",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "smoke": "node scripts/build.mjs && esbuild tests/e2e/smoke.ts --bundle --platform=node --format=cjs --external:node-pty --outfile=dist/smoke/smoke.js --log-level=warning && ELECTRON_RUN_AS_NODE=1 electron dist/smoke/smoke.js",
+    "smoke:phase2": "node scripts/build.mjs && esbuild tests/e2e/smoke-phase2.ts --bundle --platform=node --format=cjs --external:node-pty --outfile=dist/smoke/smoke-phase2.js --log-level=warning && ELECTRON_RUN_AS_NODE=1 electron dist/smoke/smoke-phase2.js",
+    "rebuild-native": "electron-rebuild -f -w node-pty",
+    "postinstall": "electron-rebuild -f -w node-pty",
+    "smoke:phase3": "node scripts/build.mjs && esbuild tests/e2e/smoke-phase3.ts --bundle --platform=node --format=cjs --external:node-pty --outfile=dist/smoke/smoke-phase3.js --log-level=warning && ELECTRON_RUN_AS_NODE=1 electron dist/smoke/smoke-phase3.js"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "node-pty": "^1.1.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.2.1",
+    "@types/node": "^24.19.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "electron": "^45.3.2",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/horigyns/ghostos.git"
+  }
+}
