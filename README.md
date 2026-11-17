@@ -1,6 +1,6 @@
 # GhostOS
 
-A local-first Mac app that is one home for all your projects and the Claude Code sessions working on them. It is organized around what needs your attention: one Board of everything waiting on you across projects, each session shown as a work log, and a library of projects with their chats, scheduled runs and memory.
+By some gift of god Anthropic's Claude desktop app is the worst organization system on the planet. So here you all go, A local-first Mac app that is one home for all your projects and the Claude Code sessions working on them. It is organized around what needs your attention: one Board of everything waiting on you across projects, each session shown as a work log, and a library of projects with their chats, scheduled runs and memory.
 
 GhostOS runs the real [Claude Code](https://docs.claude.com/en/docs/claude-code) CLI under your own login. There is no GhostOS server and no telemetry; nothing leaves your Mac except what Claude Code itself sends.
 
