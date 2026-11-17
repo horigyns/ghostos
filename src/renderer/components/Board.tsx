@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { MemoryState } from "../../shared/api";
-import type { ProjectView, RunDefinition } from "../../shared/types";
+import type { GhostState, ProjectView, RunDefinition } from "../../shared/types";
 import { briefDiff, greeting, shortAge, type BoardItem } from "../board";
 import { FormattedText } from "./chatParts";
 import { GhostMark } from "./GhostMark";
@@ -37,9 +37,35 @@ interface Props extends BoardActions {
   items: BoardItem[];
   /** items needing action in projects outside the scope */
   needsElsewhere: number;
+  /** items you hid here that would otherwise show, and until when */
+  hiddenItems: BoardItem[];
+  hiddenUntil: Record<string, number>;
+  ghost: GhostState | null;
+  unhide: (id: string) => void;
+  onTurnOnGhost: () => void;
   projects: ProjectView[];
   scope: ProjectView | null;
   now: number;
+}
+
+/** Ghost stops tracking a loop (for git work: hidden for 30 days). The board catches up when Ghost's state changes. */
+function StopTracking({ item, toast, onError }: { item: BoardItem; toast: (text: string) => void; onError: (err: unknown) => void }) {
+  if (!item.loop) return null;
+  const git = GIT_KINDS.has(item.loop.kind);
+  return (
+    <button
+      className="link-btn"
+      title={git ? "Hide this for 30 days" : "Stop tracking it"}
+      onClick={() =>
+        window.ghost.ghost
+          .decide(item.loop!.id, "dismiss")
+          .then(() => toast(git ? "Hidden for 30 days" : "No longer tracked"))
+          .catch(onError)
+      }
+    >
+      {git ? "Hide for 30 days" : "Stop tracking"}
+    </button>
+  );
 }
 
 function tail(text: string, lines: number): string {
@@ -51,6 +77,19 @@ function tail(text: string, lines: number): string {
 export function Board(props: Props) {
   const { items, projects, scope, now } = props;
   const [selected, setSelected] = useState<string | undefined>();
+  const [snoozedOpen, setSnoozedOpen] = useState(false);
+  const ghostSnoozed = (props.ghost?.enabled ? props.ghost.snoozed : []).filter((s) => !scope || s.loop.projectId === scope.id);
+  const snoozedCount = ghostSnoozed.length + props.hiddenItems.length;
+  const until = (ms: number) => (ms >= HIDE_FOREVER ? "done" : `until ${new Date(ms).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })}`);
+  const bringBackLoop = (loopId: string) =>
+    window.ghost.ghost
+      .decide(loopId, "reopen")
+      .then(() => {
+        props.unhide(`loop:${loopId}`);
+        props.toast("Back on the board");
+      })
+      .catch(props.onError);
+  const scan = () => void window.ghost.ghost.scan().catch(props.onError);
   const current = items.find((i) => i.id === selected) ?? items[0];
   const name = (id: string) => projects.find((p) => p.id === id)?.name ?? "";
 
@@ -108,8 +147,9 @@ export function Board(props: Props) {
       const active = document.activeElement;
       const focus = active?.tagName;
       if (focus === "INPUT" || focus === "TEXTAREA" || focus === "SELECT" || document.querySelector(".overlay")) return;
-      // A focused button in the detail pane handles its own Enter; don't also open the session.
-      if (focus === "BUTTON" && !active?.classList.contains("q-item")) return;
+      // A focused button handles its own Enter, and keys typed while acting on an item stay with it.
+      const onButton = focus === "BUTTON" && !active?.classList.contains("q-item");
+      if (onButton && (e.key === "Enter" || active?.closest(".detail"))) return;
       const i = current ? items.indexOf(current) : -1;
       if (e.key === "j" || e.key === "ArrowDown") {
         e.preventDefault();
@@ -155,12 +195,55 @@ export function Board(props: Props) {
           {unfinished.length > 0 && <div className="q-sec">Unfinished</div>}
           {unfinished.map(row)}
           {!items.length && <div className="faint q-none">Nothing open{scope ? ` in ${scope.name}` : ""}. Every project is caught up.</div>}
+          {props.ghost && !props.ghost.enabled && (
+            <div className="q-off">
+              Ghost is off, so unfinished work (open threads, uncommitted changes, stalled projects) isn't listed.
+              <button className="link-btn" onClick={props.onTurnOnGhost}>
+                Turn on
+              </button>
+            </div>
+          )}
+          {snoozedCount > 0 && (
+            <>
+              <button className="q-sec as-btn" onClick={() => setSnoozedOpen(!snoozedOpen)}>
+                {snoozedOpen ? "▾" : "▸"} Snoozed and done · {snoozedCount}
+              </button>
+              {snoozedOpen && (
+                <>
+                  {ghostSnoozed.map((s) => (
+                    <div key={s.loop.id} className="q-hidden">
+                      <span className="ellipsis">{s.loop.title}</span>
+                      <span className="faint">{until(Date.parse(s.until))}</span>
+                      <button className="link-btn" onClick={() => bringBackLoop(s.loop.id)}>
+                        Bring back
+                      </button>
+                    </div>
+                  ))}
+                  {props.hiddenItems.map((i) => (
+                    <div key={i.id} className="q-hidden">
+                      <span className="ellipsis">{i.title}</span>
+                      <span className="faint">{until(props.hiddenUntil[i.id] ?? 0)}</span>
+                      <button className="link-btn" onClick={() => props.unhide(i.id)}>
+                        Bring back
+                      </button>
+                    </div>
+                  ))}
+                </>
+              )}
+            </>
+          )}
         </div>
         <div className="q-keys">
           <span><b>j k</b>move</span>
           <span><b>↵</b>open</span>
           <span><b>e</b>done</span>
           <span><b>s</b>snooze</span>
+          <span className="grow" />
+          {props.ghost?.enabled && (
+            <button className="link-btn" disabled={props.ghost.scanning} title="Look across every project for unfinished work now" onClick={scan}>
+              {props.ghost.scanning ? "Looking…" : "Look now"}
+            </button>
+          )}
         </div>
       </div>
       <div className="detail">
@@ -410,7 +493,7 @@ function BriefDetail({ item, resolve, showProject, onError }: DetailProps) {
   );
 }
 
-function StalledDetail({ item, done, snooze, openSessionById, startAndResolve, onError }: DetailProps) {
+function StalledDetail({ item, done, snooze, openSessionById, startAndResolve, toast, onError }: DetailProps) {
   const loop = item.loop;
   const [where, setWhere] = useState<string | undefined>();
   useEffect(() => {
@@ -443,12 +526,13 @@ function StalledDetail({ item, done, snooze, openSessionById, startAndResolve, o
         <button className="link-btn" onClick={() => done(item)}>
           It's done
         </button>
+        <StopTracking item={item} toast={toast} onError={onError} />
       </div>
     </>
   );
 }
 
-function GitDetail({ item, snooze, startAndResolve }: DetailProps) {
+function GitDetail({ item, snooze, startAndResolve, toast, onError }: DetailProps) {
   const loop = item.loop;
   if (!loop) return null;
   const folder = loop.folder?.replace(/^\/Users\/[^/]+/, "~");
@@ -469,6 +553,7 @@ function GitDetail({ item, snooze, startAndResolve }: DetailProps) {
         <button className="link-btn" onClick={() => snooze(item)}>
           Not yet
         </button>
+        <StopTracking item={item} toast={toast} onError={onError} />
       </div>
     </>
   );

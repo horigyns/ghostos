@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { BrainState } from "../../shared/api";
-import { FALLBACK_AREA_ID, type LiveSession, type OpenSessionRequest, type ProjectView, type RunDefinition, type SessionSummary, type SessionSummaryDoc } from "../../shared/types";
+import { FALLBACK_AREA_ID, type Idea, type LiveSession, type OpenSessionRequest, type ProjectView, type RunDefinition, type SessionSummary, type SessionSummaryDoc } from "../../shared/types";
 import { ChatList } from "./ChatList";
 import { MemoryPanel } from "./MemoryPanel";
 import { Menu } from "./Menu";
@@ -68,11 +68,18 @@ export function ProjectsPlace(props: Props) {
   const run = (fn: () => Promise<unknown>) => void fn().catch(onError);
   const [dropArea, setDropArea] = useState<string | null>(null);
   const [archiveOpen, setArchiveOpen] = useState(() => readFlag(ARCHIVE_OPEN_KEY));
+  /** the ideas inbox is shown instead of a project */
+  const [inbox, setInbox] = useState(false);
   const archived = state.projects.filter((p) => p.archived);
+  const unsorted = state.ideas.filter((i) => i.projectId === null && i.status === "open");
+  const pick = (id: string) => {
+    setInbox(false);
+    onSelect(id);
+  };
 
   const addProject = async (areaId: string) => {
     const name = await ask("New project name");
-    if (name) run(async () => onSelect((await window.ghost.projects.create({ name, area: areaId })).id));
+    if (name) run(async () => pick((await window.ghost.projects.create({ name, area: areaId })).id));
   };
   const addArea = async () => {
     const name = await ask("New area name");
@@ -96,6 +103,10 @@ export function ProjectsPlace(props: Props) {
   return (
     <div className="shelf">
       <div className="shelf-l">
+        <button className={`p-nav inbox ${inbox ? "on" : ""}`} title="Ideas not filed under a project yet (⌘I captures one)" onClick={() => setInbox(true)}>
+          <span className="ellipsis">Ideas inbox</span>
+          <span className="r">{unsorted.length || ""}</span>
+        </button>
         {state.areas.map((area, index) => {
           const projects = state.projects.filter((p) => p.area === area.id && !p.archived);
           return (
@@ -141,9 +152,9 @@ export function ProjectsPlace(props: Props) {
                   key={p.id}
                   draggable
                   onDragStart={(e) => e.dataTransfer.setData(DRAG_TYPE, p.id)}
-                  className={`p-nav ${p.id === selected?.id ? "on" : ""} ${p.primaryPath ? "" : "missing"}`}
+                  className={`p-nav ${p.id === selected?.id && !inbox ? "on" : ""} ${p.primaryPath ? "" : "missing"}`}
                   title={p.primaryPath ?? "No folder on this Mac yet"}
-                  onClick={() => onSelect(p.id)}
+                  onClick={() => pick(p.id)}
                 >
                   <span className="ellipsis">{p.name}</span>
                   <span className="r">{lastActive[p.id]}</span>
@@ -166,7 +177,7 @@ export function ProjectsPlace(props: Props) {
             </button>
             {archiveOpen &&
               archived.map((p) => (
-                <div key={p.id} className={`p-nav archived ${p.id === selected?.id ? "on" : ""}`} role="button" onClick={() => onSelect(p.id)} title="Open (restore it to work in it)">
+                <div key={p.id} className={`p-nav archived ${p.id === selected?.id && !inbox ? "on" : ""}`} role="button" onClick={() => pick(p.id)} title="Open (restore it to work in it)">
                   <span className="ellipsis">{p.name}</span>
                   <span className="r hov">
                     <button className="link-btn" title="Back into its area" onClick={(e) => (e.stopPropagation(), run(() => window.ghost.projects.update(p.id, { archived: false })))}>
@@ -190,7 +201,9 @@ export function ProjectsPlace(props: Props) {
         </div>
       </div>
       <div className="shelf-r">
-        {selected ? (
+        {inbox ? (
+          <IdeasInbox ideas={unsorted} projects={state.projects.filter((p) => !p.archived)} onError={onError} />
+        ) : selected ? (
           <ProjectDetail key={selected.id} {...props} project={selected} />
         ) : (
           <div className="empty">No projects yet. Add one with + next to an area.</div>
@@ -387,14 +400,62 @@ function Overview({ project, state, live, memoryVersion, runsVersion, onView, on
         <h3>Ideas</h3>
         <input value={ideaText} placeholder="New idea  (Enter to add · ⌘I from anywhere)" onChange={(e) => setIdeaText(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addIdea()} />
         {ideas.map((idea) => (
-          <div key={idea.id} className="idea-row">
-            <span className="grow">{idea.text}</span>
-            <button className="icon-btn hov" title="Done" onClick={() => run(() => window.ghost.ideas.update(idea.id, { status: "archived" }))}>
-              ✓
-            </button>
-          </div>
+          <IdeaRow key={idea.id} idea={idea} projects={state.projects.filter((p) => !p.archived)} onError={onError} />
         ))}
       </div>
     </>
+  );
+}
+
+/** One idea: its text, a move to another project (or the inbox), and done. */
+function IdeaRow({ idea, projects, onError }: { idea: Idea; projects: ProjectView[]; onError: (err: unknown) => void }) {
+  const run = (fn: () => Promise<unknown>) => void fn().catch(onError);
+  return (
+    <div className="idea-row">
+      <span className="grow">{idea.text}</span>
+      <select
+        className="hov idea-move"
+        value={idea.projectId ?? ""}
+        title="Move to another project"
+        onChange={(e) => run(() => window.ghost.ideas.update(idea.id, { projectId: e.target.value || null }))}
+      >
+        <option value="">Inbox</option>
+        {projects.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.name}
+          </option>
+        ))}
+      </select>
+      <button className="icon-btn hov" title="Done" onClick={() => run(() => window.ghost.ideas.update(idea.id, { status: "archived" }))}>
+        ✓
+      </button>
+    </div>
+  );
+}
+
+/** Ideas captured without a project, to file under one or mark done. */
+function IdeasInbox({ ideas, projects, onError }: { ideas: Idea[]; projects: ProjectView[]; onError: (err: unknown) => void }) {
+  const [text, setText] = useState("");
+  const add = () => {
+    if (!text.trim()) return;
+    window.ghost.ideas
+      .add(text.trim(), null)
+      .then(() => setText(""))
+      .catch(onError);
+  };
+  return (
+    <div className="shelf-in">
+      <div className="shelf-h">
+        <h1>Ideas inbox</h1>
+      </div>
+      <p className="shelf-brief">Ideas captured without a project. Move each one to its project, or mark it done.</p>
+      <div className="col ideas">
+        <input value={text} placeholder="New idea  (Enter to add · ⌘I from anywhere)" onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} />
+        {[...ideas].reverse().map((idea) => (
+          <IdeaRow key={idea.id} idea={idea} projects={projects} onError={onError} />
+        ))}
+        {!ideas.length && <div className="faint col-none">Nothing unsorted.</div>}
+      </div>
+    </div>
   );
 }

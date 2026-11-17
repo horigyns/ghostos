@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { BrainState, MemoryJobUpdate } from "../shared/api";
-import type { ChatEvent, GhostState, LiveSession, OpenSessionRequest, RunRecord, SearchHit, SessionSummary, UsageSnapshot } from "../shared/types";
-import { boardItems } from "./board";
+import type { ChatEvent, GhostState, LiveSession, OpenSessionRequest, PermissionMode, RunRecord, SearchHit, SessionSummary, UsageSnapshot } from "../shared/types";
+import { boardItems, type BoardItem } from "./board";
 import { Board } from "./components/Board";
 import { CapabilitiesDialog, type CapabilitiesTab } from "./components/CapabilitiesDialog";
 import { CommandPalette, type Command } from "./components/CommandPalette";
@@ -24,6 +24,7 @@ const PLACE_KEY = "ghostos.place";
 const CONTEXT_OPEN_KEY = "ghostos.contextOpen";
 const LAST_PROJECT_KEY = "ghostos.lastProject";
 const HIDDEN_KEY = "ghostos.boardHidden";
+const NEW_SESSION_KEY = "ghostos.newSession";
 /** board items hidden longer ago than this are forgotten, so the list doesn't grow forever */
 const HIDDEN_KEEP_MS = 30 * 24 * 60 * 60_000;
 const DAY_MS = 24 * 60 * 60_000;
@@ -66,6 +67,21 @@ function readHidden(): Record<string, number> {
   }
 }
 
+export interface NewSessionPrefs {
+  /** "" = the user's default model */
+  model: string;
+  permissionMode: PermissionMode;
+}
+
+function readPrefs(): NewSessionPrefs {
+  try {
+    const parsed = JSON.parse(read(NEW_SESSION_KEY) ?? "{}") as Partial<NewSessionPrefs>;
+    return { model: typeof parsed.model === "string" ? parsed.model : "", permissionMode: parsed.permissionMode ?? "auto" };
+  } catch {
+    return { model: "", permissionMode: "auto" };
+  }
+}
+
 function relative(iso?: string): string {
   if (!iso) return "";
   const ms = Date.now() - Date.parse(iso);
@@ -103,6 +119,9 @@ export function App() {
   const [designOpen, setDesignOpen] = useState<string | undefined>(undefined);
   const [capabilitiesVersion, setCapabilitiesVersion] = useState(0);
   const [runsVersion, setRunsVersion] = useState(0);
+  const [sidenoteVersion, setSidenoteVersion] = useState(0);
+  /** model and permission mode for sessions started from the Board, ⌘K and ⌘N */
+  const [newPrefs, setNewPrefs] = useState<NewSessionPrefs>(readPrefs);
   const [memoryVersion, setMemoryVersion] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -179,6 +198,7 @@ export function App() {
       window.ghost.on.terminalData(appendTerminalData),
       window.ghost.on.usage(setUsage),
       window.ghost.on.runsChanged(() => setRunsVersion((v) => v + 1)),
+      window.ghost.on.sidenotesChanged(() => setSidenoteVersion((v) => v + 1)),
       window.ghost.on.memoryChanged(() => setMemoryVersion((v) => v + 1)),
       window.ghost.on.capabilitiesChanged(() => setCapabilitiesVersion((v) => v + 1)),
       window.ghost.on.ghostChanged(setGhost),
@@ -205,6 +225,7 @@ export function App() {
   useEffect(() => write(CONTEXT_OPEN_KEY, String(contextOpen)), [contextOpen]);
   useEffect(() => write(LAST_PROJECT_KEY, projectId), [projectId]);
   useEffect(() => write(HIDDEN_KEY, JSON.stringify(hidden)), [hidden]);
+  useEffect(() => write(NEW_SESSION_KEY, JSON.stringify(newPrefs)), [newPrefs]);
 
   // Keep the selected project and the scope pointing at projects that exist.
   useEffect(() => {
@@ -271,6 +292,16 @@ export function App() {
         : [],
     [state, live, events, activityAt, unreadRunInfo, ghost, hidden, scope, now],
   );
+  // Items you hid here (done or snoozed) that would otherwise show, so they can be brought back. Loops are left
+  // out: Ghost lists its own snoozed loops.
+  const hiddenItems = useMemo((): BoardItem[] => {
+    if (!state) return [];
+    const shown = new Set(items.map((i) => i.id));
+    return boardItems({ projects: state.projects, live, events, activityAt, unreadRuns: unreadRunInfo, pendingBriefs: state.pendingBriefs, ghost: null, hidden: {}, scope, now }).filter(
+      (i) => !shown.has(i.id) && hidden[i.id] > now,
+    );
+  }, [state, items, live, events, activityAt, unreadRunInfo, hidden, scope, now]);
+
   // The badge and the mark count every project, so a scope never hides that something is waiting elsewhere.
   const allNeeds = useMemo(
     () =>
@@ -320,7 +351,7 @@ export function App() {
       report(new Error(`${target?.name ?? "That project"} has no folder on this Mac. Add one in Projects (⋯ → Folders…).`));
       return false;
     }
-    const session = await openSession({ projectId: targetId, cwd: folder, model: model || undefined });
+    const session = await openSession({ projectId: targetId, cwd: folder, model: (model ?? newPrefs.model) || undefined, permissionMode: newPrefs.permissionMode });
     if (!session) return false;
     if (!text) return true;
     try {
@@ -390,6 +421,18 @@ export function App() {
 
   const replaceHistory = (key: string, history: ChatEvent[]) => setEvents((prev) => ({ ...prev, [key]: history }));
   const hide = (id: string, until: number) => setHidden((prev) => ({ ...prev, [id]: until }));
+  const unhide = (id: string) =>
+    setHidden((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  const turnOnGhost = () =>
+    void window.ghost.settings
+      .save({ ...state!.settings, ghost: { ...state!.settings.ghost, enabled: true } })
+      .then(() => window.ghost.ghost.scan())
+      .then(() => info("Ghost is on and looking across your projects"))
+      .catch(report);
   const changeScope = (id: string | null) => {
     setScope(id);
     if (id) info(`Scope: ${state?.projects.find((p) => p.id === id)?.name ?? ""}`);
@@ -452,6 +495,11 @@ export function App() {
             openSessionById={openSessionById}
             startSession={startSession}
             needsElsewhere={needsElsewhere}
+            hiddenItems={hiddenItems}
+            hiddenUntil={hidden}
+            ghost={ghost}
+            unhide={unhide}
+            onTurnOnGhost={turnOnGhost}
             showProject={(id, page) => showProject(id, page)}
             hide={hide}
             toast={info}
@@ -467,6 +515,7 @@ export function App() {
             ghost={ghost}
             memoryVersion={memoryVersion}
             runsVersion={runsVersion}
+            sidenoteVersion={sidenoteVersion}
             contextOpen={contextOpen}
             onOpenProject={(id) => showProject(id)}
             onOpenChat={openChat}
@@ -510,6 +559,8 @@ export function App() {
           scope={scopeProject}
           defaultProject={recentProject}
           commands={commands}
+          prefs={newPrefs}
+          onPrefs={setNewPrefs}
           onNewSession={(id, text) => void startSession(id, text)}
           onOpenLive={openLive}
           onOpenChat={openChat}

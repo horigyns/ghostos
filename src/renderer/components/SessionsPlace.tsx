@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import type { ChatEvent, GhostState, LiveSession, ProjectView, RunDefinition, RunSchedule, SessionSummary } from "../../shared/types";
+import type { ChatEvent, GhostState, LiveSession, ProjectView, RunDefinition, RunSchedule, SessionSummary, Sidenote, SidenoteMode } from "../../shared/types";
 import { pendingQuestion, sessionLabel, sessionTone } from "../board";
 import { Composer, FormattedText, OutputChip, toRows, type Row } from "./chatParts";
 import { GhostMark } from "./GhostMark";
@@ -15,6 +15,19 @@ const RECENT_SHOWN = 10;
 const EMPTY_MARK_PX = 72;
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const GIT_KINDS = new Set(["uncommitted", "unpushed", "branches"]);
+const NOTE_MODES: { mode: SidenoteMode; label: string; hint: string }[] = [
+  { mode: "now", label: "Now", hint: "Claude sees it after its next tool step, without stopping." },
+  { mode: "after", label: "After this turn", hint: "Arrives when Claude finishes this turn, or with your next message." },
+  { mode: "later", label: "Save for later", hint: "Kept with this session to come back to. Not sent." },
+];
+const NOTE_STATUS: Record<Sidenote["status"], string> = { queued: "waiting", delivered: "delivered", saved: "saved" };
+
+/** What happens to a note you just added, said plainly. */
+function noteSent(mode: SidenoteMode, busy: boolean): string {
+  if (mode === "later") return "Note saved with this session";
+  if (mode === "after") return busy ? "Note queued; Claude sees it when this turn ends" : "Note queued; Claude sees it with your next message";
+  return busy ? "Note sent; Claude sees it after its next step" : "Note queued; Claude sees it in its next turn";
+}
 
 /** Notes pinned to a message but not sent yet, per session, for as long as the window is open. */
 const pinsBySession = new Map<string, Record<number, string>>();
@@ -57,6 +70,7 @@ interface Props {
   ghost: GhostState | null;
   memoryVersion: number;
   runsVersion: number;
+  sidenoteVersion: number;
   contextOpen: boolean;
   onOpenProject: (projectId: string) => void;
   onOpenChat: (projectId: string, chat: SessionSummary) => void;
@@ -142,14 +156,14 @@ function WorkLog({ session, events, project, ghost, memoryVersion, onOpenProject
     }
   };
 
-  const sendPin = (index: number) => {
+  const sendPin = (index: number, mode: SidenoteMode) => {
     const text = pins[index];
     if (!text) return;
     window.ghost.sidenotes
-      .add({ projectId: session.projectId, sessionKey: session.key, text, mode: "now" })
+      .add({ projectId: session.projectId, sessionKey: session.key, text, mode })
       .then(() => {
         setPins(({ [index]: _sent, ...rest }) => rest);
-        toast("Note sent; Claude sees it after its next step");
+        toast(noteSent(mode, session.busy));
       })
       .catch(onError);
   };
@@ -271,9 +285,11 @@ function WorkLog({ session, events, project, ghost, memoryVersion, onOpenProject
                           <span className="who">Note</span>
                           <span>{pins[item.index]}</span>
                           <span className="act">
-                            <button className="link-btn" onClick={() => sendPin(item.index)}>
-                              Send
-                            </button>
+                            {NOTE_MODES.map((m) => (
+                              <button key={m.mode} className="link-btn" title={m.hint} onClick={() => sendPin(item.index, m.mode)}>
+                                {m.mode === "now" ? "Send" : m.label}
+                              </button>
+                            ))}
                             <button className="link-btn" title="Drop this note" onClick={() => setPins(({ [item.index]: _dropped, ...rest }) => rest)}>
                               ×
                             </button>
@@ -366,8 +382,11 @@ function Steps({ session, rows, onError }: { session: LiveSession; rows: Extract
   );
 }
 
-function ContextDrawer({ session, project, ghost, memoryVersion, runsVersion, onOpenProject, onNewSessionWith, onError }: Props & { session: LiveSession; project: ProjectView }) {
+function ContextDrawer({ session, project, ghost, memoryVersion, runsVersion, sidenoteVersion, onOpenProject, onNewSessionWith, toast, onError }: Props & { session: LiveSession; project: ProjectView }) {
   const [brief, setBrief] = useState<string | null>(null);
+  const [notes, setNotes] = useState<Sidenote[]>([]);
+  const [noteText, setNoteText] = useState("");
+  const [noteMode, setNoteMode] = useState<SidenoteMode>("now");
   const [runs, setRuns] = useState<RunDefinition[]>([]);
   const run = (fn: () => Promise<unknown>) => void fn().catch(onError);
 
@@ -393,6 +412,28 @@ function ContextDrawer({ session, project, ghost, memoryVersion, runsVersion, on
     };
   }, [project.id, runsVersion, onError]);
 
+  useEffect(() => {
+    let cancelled = false;
+    window.ghost.sidenotes
+      .list(project.id)
+      .then((list) => !cancelled && setNotes(list))
+      .catch(onError);
+    return () => {
+      cancelled = true;
+    };
+  }, [project.id, sidenoteVersion, onError]);
+
+  const sessionNotes = notes.filter((n) => session.sessionId && n.sessionId === session.sessionId).reverse();
+  const addNote = () => {
+    const text = noteText.trim();
+    if (!text) return;
+    run(async () => {
+      await window.ghost.sidenotes.add({ projectId: project.id, sessionKey: session.key, text, mode: noteMode });
+      setNoteText("");
+      toast(noteSent(noteMode, session.busy));
+    });
+  };
+
   const todos = ghost?.enabled ? ghost.projects.find((g) => g.projectId === project.id)?.loops ?? [] : [];
   const permission = PERMISSION_CHOICES.find((p) => p.value === session.permissionMode)?.label.toLowerCase() ?? session.permissionMode;
   const modelItems: MenuItem[] = [
@@ -411,6 +452,56 @@ function ContextDrawer({ session, project, ghost, memoryVersion, runsVersion, on
           </button>
         </h3>
         <p>{brief === null ? "…" : brief || "No brief yet. It fills in as you finish sessions here."}</p>
+      </div>
+      <div>
+        <h3>Notes</h3>
+        <textarea
+          className="note-input"
+          rows={2}
+          value={noteText}
+          placeholder="A thought for Claude, without stopping it…"
+          onChange={(e) => setNoteText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && e.metaKey) {
+              e.preventDefault();
+              addNote();
+            }
+          }}
+        />
+        <div className="note-add">
+          <select value={noteMode} title={NOTE_MODES.find((m) => m.mode === noteMode)?.hint} onChange={(e) => setNoteMode(e.target.value as SidenoteMode)}>
+            {NOTE_MODES.map((m) => (
+              <option key={m.mode} value={m.mode}>
+                {m.mode === "now" ? "Add now" : m.label}
+              </option>
+            ))}
+          </select>
+          <button className="primary sm" disabled={!noteText.trim()} onClick={addNote}>
+            Add ⌘↵
+          </button>
+        </div>
+        {sessionNotes.map((n) => (
+          <div key={n.id} className="note">
+            <div className="text">{n.text}</div>
+            <div className="meta">
+              <span className={`badge ${n.status}`}>{NOTE_STATUS[n.status]}</span>
+              <span className="grow" />
+              {n.status === "saved" && (
+                <button className="link-btn" title="Send into the session" onClick={() => run(() => window.ghost.sidenotes.send(n.projectId, n.id))}>
+                  Send
+                </button>
+              )}
+              {n.status === "queued" && (
+                <button className="link-btn" title="Take it back before Claude sees it" onClick={() => run(() => window.ghost.sidenotes.withdraw(n.projectId, n.id))}>
+                  Hold
+                </button>
+              )}
+              <button className="link-btn" title="Copy to this project's ideas" onClick={() => run(async () => (await window.ghost.sidenotes.promote(n.projectId, n.id), toast("Added to the project's ideas")))}>
+                → Idea
+              </button>
+            </div>
+          </div>
+        ))}
       </div>
       <div>
         <h3>To-dos</h3>

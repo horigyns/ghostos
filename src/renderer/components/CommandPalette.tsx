@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import type { Area, LiveSession, ProjectView, SessionSummary } from "../../shared/types";
+import type { Area, LiveSession, PermissionMode, ProjectView, SessionSummary } from "../../shared/types";
+import { MODEL_CHOICES, PERMISSION_CHOICES } from "./sessionChoices";
 
 const CHATS_PER_PROJECT = 4;
 const SESSIONS_IDLE = 6;
@@ -22,6 +23,9 @@ interface Props {
   /** where a typed sentence starts a session when nothing is scoped */
   defaultProject: ProjectView | null;
   commands: Command[];
+  /** model and permission mode for new sessions (from here, the Board and ⌘N) */
+  prefs: { model: string; permissionMode: PermissionMode };
+  onPrefs: (prefs: { model: string; permissionMode: PermissionMode }) => void;
   onNewSession: (projectId: string, text: string) => void;
   onOpenLive: (key: string) => void;
   onOpenChat: (projectId: string, chat: SessionSummary) => void;
@@ -38,7 +42,7 @@ interface Item {
 }
 
 /** ⌘K: go to a session or project, run a command, or type a sentence to start a session. */
-export function CommandPalette({ projects, areas, live, scope, defaultProject, commands, onNewSession, onOpenLive, onOpenChat, onScope, onError, onClose }: Props) {
+export function CommandPalette({ projects, areas, live, scope, defaultProject, commands, prefs, onPrefs, onNewSession, onOpenLive, onOpenChat, onScope, onError, onClose }: Props) {
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState(0);
   const [recent, setRecent] = useState<{ projectId: string; chat: SessionSummary }[]>([]);
@@ -106,7 +110,7 @@ export function CommandPalette({ projects, areas, live, scope, defaultProject, c
 
   return (
     <div className="overlay" onMouseDown={onClose}>
-      <div className="palette" onMouseDown={(e) => e.stopPropagation()}>
+      <div className="palette cmd" onMouseDown={(e) => e.stopPropagation()}>
         <input
           autoFocus
           placeholder="Go to, search, or run a command…"
@@ -137,7 +141,25 @@ export function CommandPalette({ projects, areas, live, scope, defaultProject, c
           ))}
           {!items.length && <div className="faint" style={{ padding: 10 }}>Nothing matches.</div>}
         </div>
-        <div className="palette-foot faint">↵ open · type a sentence to start a session · esc close</div>
+        <div className="palette-foot faint">
+          <span className="nowrap">↵ open · type a sentence to start a session</span>
+          <span className="grow" />
+          <span className="nowrap" title="For sessions started from ⌘K, ⌘N and the Board">New sessions</span>
+          <select className="mini-select" value={prefs.model} onChange={(e) => onPrefs({ ...prefs, model: e.target.value })}>
+            {MODEL_CHOICES.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+          <select className="mini-select" value={prefs.permissionMode} onChange={(e) => onPrefs({ ...prefs, permissionMode: e.target.value as PermissionMode })}>
+            {PERMISSION_CHOICES.map((p) => (
+              <option key={p.value} value={p.value}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
     </div>
   );
